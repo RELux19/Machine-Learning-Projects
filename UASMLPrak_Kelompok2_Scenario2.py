@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import seaborn as sns
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
@@ -33,6 +34,28 @@ if 'UMUR_TAHUN' in df.columns:
 if 'A' in df.columns:
     df = df.drop(columns=['A'])
 
+# Cek missing values
+print("\nJumlah missing values per kolom:")
+print(df.isnull().sum())
+
+# Checking Outliers and replacing them with mean
+def replace_outliers_with_mean(data, column):
+    Q1 = data[column].quantile(0.25)
+    Q3 = data[column].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    mean_value = data[column].mean()
+    data[column] = np.where((data[column] < lower_bound) | (data[column] > upper_bound), mean_value, data[column])
+    return data
+
+numeric_cols = df.select_dtypes(include=[np.number]).columns
+for col in numeric_cols:
+    outlier_count = ((df[col] < df[col].quantile(0.25) - 1.5 * (df[col].quantile(0.75) - df[col].quantile(0.25))) |
+                     (df[col] > df[col].quantile(0.75) + 1.5 * (df[col].quantile(0.75) - df[col].quantile(0.25)))).sum()
+    print(f"Jumlah outlier di kolom {col}: {outlier_count}")
+    df = replace_outliers_with_mean(df, col)
+
 # Convert 'Umur' to numeric and drop invalid rows
 df['Umur'] = pd.to_numeric(df['Umur'], errors='coerce')
 df = df.dropna(subset=['Umur']).reset_index(drop=True)
@@ -50,12 +73,18 @@ df_clean = df_clean.drop(columns=['Umur'])
 X = df_clean.drop(columns=['N'])
 y = df_clean['N']
 
-# Label‐encode the new 'Umur_binned' column
+# Pastikan target memiliki lebih dari 1 kelas
+print("Distribusi label target:")
+print(y.value_counts())
+if len(y.unique()) < 2:
+    raise ValueError("Target hanya memiliki satu kelas. Klasifikasi tidak bisa dilakukan.")
+
+# Label encode umur binned
 le = LabelEncoder()
 X['Umur_binned'] = le.fit_transform(X['Umur_binned'])
 
-# 4) Chi‐square feature selection to pick top 5 features
-# -------------------------------------------------------
+# 4) Chi-square feature selection
+# -------------------------------
 scaler = MinMaxScaler()
 X_scaled = scaler.fit_transform(X)
 
@@ -71,14 +100,14 @@ chi2_df = pd.DataFrame({
 top5 = chi2_df['Feature'].iloc[:5].tolist()
 X_selected = X[top5]
 
-# 5) Split into train/test (80% / 20%)
-# ------------------------------------
+# 5) Train-test split
+# -------------------
 X_train, X_test, y_train, y_test = train_test_split(
     X_selected, y, test_size=0.2, random_state=42, stratify=y
 )
 
-# 6) Define all five models
-# --------------------------
+# 6) Define models
+# ----------------
 models = {
     'Decision Tree': DecisionTreeClassifier(random_state=42),
     'Random Forest': RandomForestClassifier(n_estimators=100, random_state=42),
@@ -89,23 +118,23 @@ models = {
 
 results = []
 
-# 7) Train, evaluate, and display for each model
-# -----------------------------------------------
+# 7) Train & evaluate
+# -------------------
 for name, model in models.items():
-    # --- Train ---
     if name == 'SVM':
-        # Scale inputs for SVM
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
-        y_proba = model.predict_proba(X_test_scaled)[:, 1]
+        proba = model.predict_proba(X_test_scaled)
     else:
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
-        y_proba = model.predict_proba(X_test)[:, 1]
+        proba = model.predict_proba(X_test)
 
-    # --- Compute metrics ---
+    # Prevent Errors When Only One Class is Present
+    y_proba = proba[:, 1] if proba.shape[1] > 1 else np.zeros_like(y_pred)
+
     acc = accuracy_score(y_test, y_pred)
     prec = precision_score(y_test, y_pred, zero_division=0)
     rec = recall_score(y_test, y_pred, zero_division=0)
@@ -128,23 +157,18 @@ for name, model in models.items():
         'AUC-ROC': round(auc, 4)
     })
 
-    # --- Visual preview window ---
+    # Visualization per model
     plt.figure(figsize=(8, 6))
-
     if name == 'Decision Tree':
-        # Plot the tree structure
         plot_tree(
             model,
             feature_names=top5,
             class_names=[str(c) for c in model.classes_],
-            filled=True,
-            rounded=True,
-            fontsize=8
+            filled=True, rounded=True, fontsize=8
         )
         plt.title(f"{name} Structure")
 
-    elif name == 'Random Forest':
-        # Bar chart of feature importances
+    elif name in ['Random Forest', 'XGBoost', 'LightGBM']:
         importances = model.feature_importances_
         indices = np.argsort(importances)[::-1]
         plt.bar(range(len(top5)), importances[indices], align='center')
@@ -153,7 +177,6 @@ for name, model in models.items():
         plt.ylabel("Importance Score")
 
     elif name == 'SVM':
-        # ROC curve
         fpr, tpr, _ = roc_curve(y_test, y_proba)
         plt.plot(fpr, tpr, label=f"AUC = {auc:.3f}")
         plt.plot([0, 1], [0, 1], linestyle='--', color='gray')
@@ -162,28 +185,10 @@ for name, model in models.items():
         plt.title(f"{name} ROC Curve")
         plt.legend(loc="lower right")
 
-    elif name == 'XGBoost':
-        # Bar chart of feature importances
-        importances = model.feature_importances_
-        indices = np.argsort(importances)[::-1]
-        plt.bar(range(len(top5)), importances[indices], align='center')
-        plt.xticks(range(len(top5)), [top5[i] for i in indices], rotation=45)
-        plt.title(f"{name} Feature Importances")
-        plt.ylabel("Importance Score")
-
-    elif name == 'LightGBM':
-        # Bar chart of feature importances
-        importances = model.feature_importances_
-        indices = np.argsort(importances)[::-1]
-        plt.bar(range(len(top5)), importances[indices], align='center')
-        plt.xticks(range(len(top5)), [top5[i] for i in indices], rotation=45)
-        plt.title(f"{name} Feature Importances")
-        plt.ylabel("Importance Score")
-
     plt.tight_layout()
-    plt.show()  # This opens a new window (or inline figure) for each model
+    plt.show()
 
-# 8) Finally, show a combined summary table in its own window
+# 8) Summary Table
 results_df = pd.DataFrame(results).set_index('Model')
 
 plt.figure(figsize=(6, 4))
